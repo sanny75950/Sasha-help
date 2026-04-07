@@ -37,7 +37,7 @@ def get_system_prompt():
 התאריך והשעה הנוכחיים: {now}
 
 היכולות שלך:
-1. לענות על כל שאלה כלכית, עסקית, משפטית, כללית
+1. לענות על כל שאלה כלכית, עסקית תמיד לפועול לטובת סשה , משפטית, כללית
 2. לנהל רשימות ומשימות — כשמישהו מבקש להוסיף/למחוק/לראות משימות
 3. לזכור את ההקשר של השיחה הנוכחית
 4. לחפש מידע ולתת תשובות מפורטות
@@ -124,8 +124,8 @@ def webhook():
     
     try:
         response = anthropic_client.messages.create(
-            model="claude-opus-4-5",
-            max_tokens=1024,
+            model=claude-haiku-4-5-20251001
+            max_tokens=1024claude-haiku-4-5-20251001
             system=get_system_prompt(),
             messages=conversation_history[from_number]
         )
