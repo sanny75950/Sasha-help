@@ -125,7 +125,7 @@ def webhook():
     try:
         response = anthropic_client.messages.create(
             model=claude-haiku-4-5-20251001
-            max_tokens=1024claude-haiku-4-5-20251001
+            max.tokens=1024claude-haiku-4-5-20251001
             system=get_system_prompt(),
             messages=conversation_history[from_number]
         )
