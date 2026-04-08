@@ -1,10 +1,10 @@
-
 import os
 import re
 from flask import Flask, request
 from twilio.twiml.messaging_response import MessagingResponse
 import anthropic
 from datetime import datetime
+import threading
 
 app = Flask(__name__)
 
@@ -25,29 +25,17 @@ def get_system_prompt(phone):
 התאריך והשעה: {now}
 {profile_text}
 
-האישיות שלך:
-- עוזר אישי מקיף — עונה על כל שאלה בכל נושא
-- בעל ידע מעמיק במניות, שוק ההון וקריפטו
-- תמיד פועל לטובת סשה בלבד
-- ידידותי, ישיר וקצר
-- זוכר את כל מה שדיברתם בשיחה הנוכחית
-- כשרלוונטי — מחפש מידע עדכני ברשת
-
-יכולות:
-- עונה על כל שאלה — כללית, עסקית, אישית, טכנית
-- מחפש מידע עדכני כשצריך (חדשות, מניות, מזג אוויר וכו')
-- מנהל משימות ורשימות ([ADD_TASK: משימה], [SHOW_TASKS], [DONE_TASK: מספר])
-- זוכר מידע אישי ([REMEMBER: עובדה])
-- בנושאי השקעות — מנתח ומציג עובדות, תמיד מציין סיכונים
-
-כללים:
-- תמיד ענה בעברית
-- אל תמליץ ישירות על קנייה/מכירה — תנתח ותציג עובדות
-- זכור פרטים שסשה מספר ושמור אותם"""
+אתה עוזר אישי מקיף — עונה על כל שאלה בכל נושא.
+יש לך ידע מעמיק במניות, שוק ההון וקריפטו.
+תמיד פועל לטובת סשה בלבד.
+ידידותי, ישיר וקצר.
+תמיד ענה בעברית.
+כשנשאל על השקעות — נתח והצג עובדות, תמיד ציין סיכונים.
+זכור פרטים שסשה מספר: [REMEMBER: עובדה]
+ניהול משימות: [ADD_TASK: משימה], [SHOW_TASKS], [DONE_TASK: מספר]"""
 
 def process_commands(response_text, phone):
-    remember_matches = re.findall(r'\[REMEMBER: (.+?)\]', response_text)
-    for match in remember_matches:
+    for match in re.findall(r'\[REMEMBER: (.+?)\]', response_text):
         if phone not in user_profile:
             user_profile[phone] = {}
         existing = user_profile[phone].get("notes", "")
@@ -57,13 +45,10 @@ def process_commands(response_text, phone):
     tasks = user_profile.get("tasks_" + phone, [])
 
     if "[SHOW_TASKS]" in response_text:
-        if not tasks:
-            task_list = "אין לך משימות פתוחות."
-        else:
-            task_list = "המשימות שלך:\n"
-            for i, t in enumerate(tasks, 1):
-                status = "v" if t.get("done") else "o"
-                task_list += f"{status} {i}. {t['text']}\n"
+        task_list = "אין משימות." if not tasks else "המשימות שלך:\n" + "\n".join(
+            f"{'v' if t.get('done') else 'o'} {i}. {t['text']}" 
+            for i, t in enumerate(tasks, 1)
+        )
         response_text = response_text.replace("[SHOW_TASKS]", task_list)
 
     for match in re.findall(r'\[ADD_TASK: (.+?)\]', response_text):
@@ -76,9 +61,19 @@ def process_commands(response_text, phone):
         if 0 <= idx < len(tasks):
             tasks[idx]["done"] = True
             user_profile["tasks_" + phone] = tasks
-        response_text = response_text.replace(f"[DONE_TASK: {match}]", "סומן כבוצע!")
+        response_text = response_text.replace(f"[DONE_TASK: {match}]", "סומן!")
 
     return response_text
+
+def needs_search(msg):
+    """האם השאלה דורשת חיפוש ברשת?"""
+    search_keywords = [
+        "מחיר", "שער", "עכשיו", "היום", "חדשות", "עדכון",
+        "כמה שווה", "מה קורה", "ביטקוין", "מניה", "נאסד",
+        "דולר", "אירו", "מזג אוויר", "חופשה", "טיסה", "מלון"
+    ]
+    msg_lower = msg.lower()
+    return any(kw in msg_lower for kw in search_keywords)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
@@ -96,19 +91,21 @@ def webhook():
         "content": incoming_msg
     })
 
-    if len(conversation_history[from_number]) > 30:
-        conversation_history[from_number] = conversation_history[from_number][-30:]
+    if len(conversation_history[from_number]) > 20:
+        conversation_history[from_number] = conversation_history[from_number][-20:]
 
     try:
+        # חיפוש ברשת רק כשצריך
+        tools = []
+        if needs_search(incoming_msg):
+            tools = [{"type": "web_search_20250305", "name": "web_search"}]
+
         response = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+            max_tokens=800,
             system=get_system_prompt(from_number),
             messages=conversation_history[from_number],
-            tools=[{
-                "type": "web_search_20250305",
-                "name": "web_search"
-            }]
+            tools=tools if tools else anthropic.NOT_GIVEN
         )
 
         bot_reply = ""
@@ -117,9 +114,10 @@ def webhook():
                 bot_reply += block.text
 
         if not bot_reply:
-            bot_reply = "מצטער, לא הצלחתי לעבד את הבקשה."
+            bot_reply = "מצטער, לא הצלחתי לעבד."
 
         bot_reply = process_commands(bot_reply, from_number)
+        bot_reply = bot_reply[:1500]  # הגבל אורך
 
         conversation_history[from_number].append({
             "role": "assistant",
