@@ -11,7 +11,6 @@ app = Flask(__name__)
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-# זיכרון בזמן ריצה
 conversation_history = {}
 user_profile = {}
 
@@ -19,49 +18,42 @@ def get_system_prompt(phone):
     now = datetime.now().strftime("%A, %d/%m/%Y %H:%M")
     profile = user_profile.get(phone, {})
     profile_text = ""
-    if profile:
-        profile_text = f"\nמה שאתה יודע על המשתמש: {profile}"
+    if profile.get("notes"):
+        profile_text = f"\nמה שאתה יודע על המשתמש: {profile['notes']}"
 
-    return f"""אתה סשה-בוט — עוזר אישי חכם, מוכוון כלכלה ופיננסים.
+    return f"""אתה סשה-בוט — העוזר האישי החכם של סשה.
 התאריך והשעה: {now}
 {profile_text}
 
 האישיות שלך:
-- תמיד פועל לטובת המשתמש בלבד
-- מומחה במניות, שוק ההון וקריפטו
-- נותן מידע עדכני, מנתח הזדמנויות
-- ישיר, קצר, ומעשי
-- זוכר את כל מה שדיברתם
-- תמיד מציין סיכונים לצד הזדמנויות
+- עוזר אישי מקיף — עונה על כל שאלה בכל נושא
+- בעל ידע מעמיק במניות, שוק ההון וקריפטו
+- תמיד פועל לטובת סשה בלבד
+- ידידותי, ישיר וקצר
+- זוכר את כל מה שדיברתם בשיחה הנוכחית
+- כשרלוונטי — מחפש מידע עדכני ברשת
 
-יכולות מיוחדות:
-- חיפוש מידע עדכני ברשת (השתמש ב-[SEARCH: שאילתה])
-- שמירת מידע על המשתמש (השתמש ב-[REMEMBER: עובדה])
-- ניהול משימות ([ADD_TASK: משימה], [SHOW_TASKS], [DONE_TASK: מספר])
+יכולות:
+- עונה על כל שאלה — כללית, עסקית, אישית, טכנית
+- מחפש מידע עדכני כשצריך (חדשות, מניות, מזג אוויר וכו')
+- מנהל משימות ורשימות ([ADD_TASK: משימה], [SHOW_TASKS], [DONE_TASK: מספר])
+- זוכר מידע אישי ([REMEMBER: עובדה])
+- בנושאי השקעות — מנתח ומציג עובדות, תמיד מציין סיכונים
 
 כללים:
 - תמיד ענה בעברית
-- כשנשאל על מניה/קריפטו — תמיד חפש מידע עדכני
 - אל תמליץ ישירות על קנייה/מכירה — תנתח ותציג עובדות
-- זכור פרטים אישיים שהמשתמש מספר ושמור אותם"""
+- זכור פרטים שסשה מספר ושמור אותם"""
 
-def process_commands(response_text, phone, incoming_msg):
-    """מעבד פקודות מיוחדות בתשובת הבוט"""
-    
-    # שמירת מידע על המשתמש
+def process_commands(response_text, phone):
     remember_matches = re.findall(r'\[REMEMBER: (.+?)\]', response_text)
     for match in remember_matches:
         if phone not in user_profile:
             user_profile[phone] = {}
-        # שמור כטקסט חופשי
         existing = user_profile[phone].get("notes", "")
         user_profile[phone]["notes"] = existing + " | " + match if existing else match
         response_text = response_text.replace(f"[REMEMBER: {match}]", "")
 
-    # ניהול משימות
-    if "tasks" not in user_profile:
-        user_profile["tasks_" + phone] = []
-    
     tasks = user_profile.get("tasks_" + phone, [])
 
     if "[SHOW_TASKS]" in response_text:
@@ -96,7 +88,6 @@ def webhook():
     if not incoming_msg:
         return str(MessagingResponse())
 
-    # שמור היסטוריה
     if from_number not in conversation_history:
         conversation_history[from_number] = []
 
@@ -105,7 +96,6 @@ def webhook():
         "content": incoming_msg
     })
 
-    # שמור רק 30 הודעות אחרונות
     if len(conversation_history[from_number]) > 30:
         conversation_history[from_number] = conversation_history[from_number][-30:]
 
@@ -121,7 +111,6 @@ def webhook():
             }]
         )
 
-        # אסוף את כל התשובה כולל תוצאות חיפוש
         bot_reply = ""
         for block in response.content:
             if hasattr(block, "text"):
@@ -130,7 +119,7 @@ def webhook():
         if not bot_reply:
             bot_reply = "מצטער, לא הצלחתי לעבד את הבקשה."
 
-        bot_reply = process_commands(bot_reply, from_number, incoming_msg)
+        bot_reply = process_commands(bot_reply, from_number)
 
         conversation_history[from_number].append({
             "role": "assistant",
