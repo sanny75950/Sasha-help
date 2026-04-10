@@ -1,6 +1,7 @@
 import os
 import re
 import asyncio
+import threading
 import anthropic
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -9,12 +10,24 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import base64
 import httpx
+from flask import Flask
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Flask app לסגירת דרישת הפורט של Render
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    return "סשה-בוט פעיל! 🤖", 200
+
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
 
 # --- מסד נתונים ---
 def get_db():
@@ -59,11 +72,7 @@ def get_history(user_id, limit=20):
     try:
         conn = get_db()
         cur = conn.cursor(cursor_factory=RealDictCursor)
-        cur.execute("""
-            SELECT role, content FROM messages 
-            WHERE user_id = %s 
-            ORDER BY created_at DESC LIMIT %s
-        """, (user_id, limit))
+        cur.execute("SELECT role, content FROM messages WHERE user_id = %s ORDER BY created_at DESC LIMIT %s", (user_id, limit))
         rows = cur.fetchall()
         cur.close()
         conn.close()
@@ -75,10 +84,7 @@ def save_message(user_id, role, content):
     try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO messages (user_id, role, content) VALUES (%s, %s, %s)",
-            (user_id, role, content)
-        )
+        cur.execute("INSERT INTO messages (user_id, role, content) VALUES (%s, %s, %s)", (user_id, role, content))
         conn.commit()
         cur.close()
         conn.close()
@@ -101,10 +107,7 @@ def save_profile(user_id, notes):
     try:
         conn = get_db()
         cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO user_profile (user_id, notes) VALUES (%s, %s)
-            ON CONFLICT (user_id) DO UPDATE SET notes = %s
-        """, (user_id, notes, notes))
+        cur.execute("INSERT INTO user_profile (user_id, notes) VALUES (%s, %s) ON CONFLICT (user_id) DO UPDATE SET notes = %s", (user_id, notes, notes))
         conn.commit()
         cur.close()
         conn.close()
@@ -162,7 +165,6 @@ def delete_task(user_id, idx):
     except Exception as e:
         print(f"Delete task error: {e}")
 
-# --- System Prompt ---
 def get_system_prompt(user_id):
     now = datetime.now().strftime("%A, %d/%m/%Y %H:%M")
     notes = get_profile(user_id)
@@ -170,33 +172,25 @@ def get_system_prompt(user_id):
     return f"""אתה סשה-בוט — העוזר האישי החכם של סשה.
 התאריך והשעה: {now}
 {profile_text}
-
 אתה עוזר אישי מקיף — עונה על כל שאלה בכל נושא.
 יש לך ידע מעמיק במניות, שוק ההון וקריפטו.
 יש לך גישה מלאה לאינטרנט — תמיד חפש מידע עדכני.
-אתה יכול לנתח תמונות, מסמכים, ותיקי השקעות.
+אתה יכול לנתח תמונות ומסמכים.
 תמיד פועל לטובת סשה בלבד.
 ידידותי, ישיר וקצר. תמיד ענה בעברית.
-כשנשאל על השקעות — נתח והצג עובדות, תמיד ציין סיכונים.
-זכור פרטים על סשה: [REMEMBER: עובדה]
+זכור פרטים: [REMEMBER: עובדה]
 משימות: [ADD_TASK: משימה], [SHOW_TASKS], [DONE_TASK: מספר], [DELETE_TASK: מספר]"""
 
-# --- עיבוד פקודות ---
 def process_commands(response_text, user_id):
     for match in re.findall(r'\[REMEMBER: (.+?)\]', response_text):
         existing = get_profile(user_id)
-        new_notes = existing + " | " + match if existing else match
-        save_profile(user_id, new_notes)
+        save_profile(user_id, existing + " | " + match if existing else match)
         response_text = response_text.replace(f"[REMEMBER: {match}]", "")
 
     if "[SHOW_TASKS]" in response_text:
         tasks = get_tasks(user_id)
-        if not tasks:
-            task_list = "אין לך משימות פתוחות."
-        else:
-            task_list = "המשימות שלך:\n" + "\n".join(
-                f"{'✅' if t['done'] else '⬜'} {i}. {t['text']}"
-                for i, t in enumerate(tasks, 1))
+        task_list = "אין משימות." if not tasks else "המשימות שלך:\n" + "\n".join(
+            f"{'✅' if t['done'] else '⬜'} {i}. {t['text']}" for i, t in enumerate(tasks, 1))
         response_text = response_text.replace("[SHOW_TASKS]", task_list)
 
     for match in re.findall(r'\[ADD_TASK: (.+?)\]', response_text):
@@ -205,7 +199,7 @@ def process_commands(response_text, user_id):
 
     for match in re.findall(r'\[DONE_TASK: (\d+)\]', response_text):
         done_task(user_id, int(match) - 1)
-        response_text = response_text.replace(f"[DONE_TASK: {match}]", "✅ סומן כבוצע!")
+        response_text = response_text.replace(f"[DONE_TASK: {match}]", "✅ סומן!")
 
     for match in sorted(re.findall(r'\[DELETE_TASK: (\d+)\]', response_text), reverse=True):
         delete_task(user_id, int(match) - 1)
@@ -213,14 +207,11 @@ def process_commands(response_text, user_id):
 
     return response_text.strip()
 
-# --- טיפול בהודעות טקסט ---
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     incoming_msg = update.message.text
-
     save_message(user_id, "user", incoming_msg)
     history = get_history(user_id)
-
     try:
         response = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -229,10 +220,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             messages=[{"role": m["role"], "content": m["content"]} for m in history],
             tools=[{"type": "web_search_20250305", "name": "web_search"}]
         )
-        bot_reply = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                bot_reply += block.text
+        bot_reply = "".join(block.text for block in response.content if hasattr(block, "text"))
         if not bot_reply:
             bot_reply = "מצטער, לא הצלחתי לעבד."
         bot_reply = process_commands(bot_reply, user_id)[:4000]
@@ -240,33 +228,25 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         bot_reply = "מצטער, קרתה שגיאה. נסה שוב."
         print(f"Error: {str(e)}")
-
     await update.message.reply_text(bot_reply)
 
-# --- טיפול בתמונות ---
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     caption = update.message.caption or "תאר ונתח את התמונה הזו בפירוט"
-
     try:
         photo = update.message.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-        
         async with httpx.AsyncClient() as client:
-            response = await client.get(file.file_path)
-            image_data = base64.standard_b64encode(response.content).decode("utf-8")
-
+            resp = await client.get(file.file_path)
+            image_data = base64.standard_b64encode(resp.content).decode("utf-8")
         ai_response = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             system=get_system_prompt(user_id),
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
-                    {"type": "text", "text": caption}
-                ]
-            }]
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": image_data}},
+                {"type": "text", "text": caption}
+            ]}]
         )
         bot_reply = ai_response.content[0].text
         bot_reply = process_commands(bot_reply, user_id)[:4000]
@@ -275,20 +255,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         bot_reply = "מצטער, לא הצלחתי לנתח את התמונה."
         print(f"Photo error: {str(e)}")
-
     await update.message.reply_text(bot_reply)
 
-# --- הפעלה ---
-async def main():
+async def run_bot():
     init_db()
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    print("סשה-בוט Telegram פעיל עם כל הפיצ'רים!")
+    print("סשה-בוט Telegram פעיל!")
     async with app:
         await app.start()
         await app.updater.start_polling(drop_pending_updates=True)
         await asyncio.Event().wait()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # הפעל Flask בthread נפרד
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    # הפעל הבוט
+    asyncio.run(run_bot())
