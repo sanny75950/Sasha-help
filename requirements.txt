@@ -1,2 +1,4 @@
 anthropic
 python-telegram-bot==21.10
+psycopg2-binary
+httpx
