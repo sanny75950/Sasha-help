@@ -26,13 +26,9 @@ def get_system_prompt(user_id):
 תמיד פועל לטובת סשה בלבד.
 ידידותי, ישיר וקצר. תמיד ענה בעברית.
 כשנשאל על השקעות — נתח והצג עובדות, תמיד ציין סיכונים.
+יש לך גישה מלאה לאינטרנט ואתה מחפש מידע עדכני לכל שאלה.
 זכור פרטים: [REMEMBER: עובדה]
 משימות: [ADD_TASK: משימה], [SHOW_TASKS], [DONE_TASK: מספר]"""
-
-def needs_search(msg):
-    keywords = ["מחיר", "שער", "עכשיו", "היום", "חדשות", "ביטקוין",
-                "מניה", "דולר", "מזג אוויר", "חופשה", "קריפטו"]
-    return any(kw in msg for kw in keywords)
 
 def process_commands(response_text, user_id):
     for match in re.findall(r'\[REMEMBER: (.+?)\]', response_text):
@@ -68,13 +64,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(conversation_history[user_id]) > 20:
         conversation_history[user_id] = conversation_history[user_id][-20:]
     try:
-        tools = [{"type": "web_search_20250305", "name": "web_search"}] if needs_search(incoming_msg) else []
         response = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
             max_tokens=1024,
             system=get_system_prompt(user_id),
             messages=conversation_history[user_id],
-            tools=tools if tools else anthropic.NOT_GIVEN
+            tools=[{"type": "web_search_20250305", "name": "web_search"}]
         )
         bot_reply = ""
         for block in response.content:
@@ -93,10 +88,10 @@ async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("סשה-בוט Telegram פעיל!")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-    await asyncio.Event().wait()
+    async with app:
+        await app.start()
+        await app.updater.start_polling(drop_pending_updates=True)
+        await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
