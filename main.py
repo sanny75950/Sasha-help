@@ -6,11 +6,12 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime
 from telegram import Update
-from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import base64
 import httpx
 from flask import Flask, request, Response
 import json
+import threading
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
@@ -20,32 +21,27 @@ RENDER_URL = os.environ.get("RENDER_URL", "")
 anthropic_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 flask_app = Flask(__name__)
 ptb_app = None
+bot_loop = None
 
-# --- DB ---
 def get_db():
     return psycopg2.connect(DATABASE_URL)
 
 def init_db():
     try:
-        conn = get_db()
-        cur = conn.cursor()
+        conn = get_db(); cur = conn.cursor()
         cur.execute("CREATE TABLE IF NOT EXISTS messages (id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at TIMESTAMP DEFAULT NOW())")
         cur.execute("CREATE TABLE IF NOT EXISTS tasks (id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL, text TEXT NOT NULL, done BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())")
         cur.execute("CREATE TABLE IF NOT EXISTS user_profile (user_id BIGINT PRIMARY KEY, notes TEXT DEFAULT '')")
-        conn.commit()
-        cur.close()
-        conn.close()
+        conn.commit(); cur.close(); conn.close()
         print("DB ready")
     except Exception as e:
         print(f"DB error: {e}")
 
 def get_history(user_id):
     try:
-        conn = get_db()
-        cur = conn.cursor(cursor_factory=RealDictCursor)
+        conn = get_db(); cur = conn.cursor(cursor_factory=RealDictCursor)
         cur.execute("SELECT role, content FROM messages WHERE user_id = %s ORDER BY created_at DESC LIMIT 20", (user_id,))
-        rows = cur.fetchall()
-        cur.close(); conn.close()
+        rows = cur.fetchall(); cur.close(); conn.close()
         return list(reversed(rows))
     except: return []
 
@@ -150,8 +146,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history = get_history(user_id)
     try:
         response = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
+            model="claude-haiku-4-5-20251001", max_tokens=1024,
             system=get_system_prompt(user_id),
             messages=[{"role": m["role"], "content": m["content"]} for m in history],
             tools=[{"type": "web_search_20250305", "name": "web_search"}]
@@ -195,18 +190,23 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def home():
     return "סשה-בוט פעיל! 🤖", 200
 
-@flask_app.route(f"/webhook/{TELEGRAM_TOKEN}", methods=["POST"])
+@flask_app.route(f"/webhook", methods=["POST"])
 def webhook():
-    if ptb_app is None:
+    global ptb_app, bot_loop
+    if ptb_app is None or bot_loop is None:
         return Response("not ready", status=503)
-    data = request.get_json(force=True)
-    asyncio.run_coroutine_threadsafe(
-        ptb_app.process_update(Update.de_json(data, ptb_app.bot)),
-        asyncio.get_event_loop()
-    )
+    try:
+        data = request.get_json(force=True)
+        update = Update.de_json(data, ptb_app.bot)
+        future = asyncio.run_coroutine_threadsafe(
+            ptb_app.process_update(update), bot_loop
+        )
+        future.result(timeout=30)
+    except Exception as e:
+        print(f"Webhook error: {e}")
     return Response("ok", status=200)
 
-async def setup_webhook():
+async def bot_main():
     global ptb_app
     init_db()
     ptb_app = ApplicationBuilder().token(TELEGRAM_TOKEN).updater(None).build()
@@ -214,20 +214,20 @@ async def setup_webhook():
     ptb_app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     await ptb_app.initialize()
     await ptb_app.start()
-    webhook_url = f"{RENDER_URL}/webhook/{TELEGRAM_TOKEN}"
+    webhook_url = f"{RENDER_URL}/webhook"
     await ptb_app.bot.set_webhook(webhook_url)
-    print(f"Webhook set: {webhook_url}")
+    print(f"✅ Webhook set: {webhook_url}")
+    await asyncio.Event().wait()
 
-def run_async_setup():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(setup_webhook())
-    loop.run_forever()
+def run_bot():
+    global bot_loop
+    bot_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(bot_loop)
+    bot_loop.run_until_complete(bot_main())
 
 if __name__ == "__main__":
-    import threading
-    t = threading.Thread(target=run_async_setup, daemon=True)
+    t = threading.Thread(target=run_bot, daemon=True)
     t.start()
     import time; time.sleep(3)
     port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port, threaded=True)
